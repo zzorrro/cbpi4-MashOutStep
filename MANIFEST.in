@@ -1,0 +1,5 @@
+include README.md
+include cbpi4_MashOutStep/config.yaml
+include cbpi4_MashOutStep/*.yaml
+include cbpi4_MashOutStep/*.txt
+include cbpi4_MashOutStep/*.rst
