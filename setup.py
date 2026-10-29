@@ -9,7 +9,7 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
 setup(
     name='cbpi4-MashOutStep',
     version='1.0.0',
-    description='CraftBeerPi 4 MashOut Step Plugin',
+    description='CraftBeerPi4 MashOut Step Plugin',
     author='Sammy Brewery',
     author_email='your.email@example.com',
     url='https://github.com/zzorrro/cbpi4-MashOutStep',
