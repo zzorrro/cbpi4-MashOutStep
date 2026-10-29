@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 ])
 class MashOutStep(CBPiStep):
 
-    @action("Start Timer", [])
+    @action("START TIMER", [])
     async def start_timer(self):
         if self.timer.is_running is not True:
             self.cbpi.notify(self.name, 'Timer started', NotificationType.INFO)
@@ -31,7 +31,7 @@ class MashOutStep(CBPiStep):
         else:
             self.cbpi.notify(self.name, 'Timer is already running', NotificationType.WARNING)
 
-    @action("Add 5 Minutes to Timer", [])
+    @action("ADD 5 MINUTES TO TIMER", [])
     async def add_timer(self):
         if self.timer.is_running == True:
             self.cbpi.notify(self.name, '5 Minutes added', NotificationType.INFO)
