@@ -1,5 +1,8 @@
 import asyncio
+import aiohttp
 import logging
+from datetime import datetime
+import time
 from cbpi.api import *
 from cbpi.api.step import CBPiStep, StepResult
 from cbpi.api.timer import Timer
@@ -8,144 +11,121 @@ from cbpi.api.dataclasses import NotificationType
 logger = logging.getLogger(__name__)
 
 @parameters([
-    Property.Kettle(label="Kettle", description="Варочный котел"),
-    Property.Sensor(label="Sensor", description="Датчик температуры"),
-    Property.Number(label="Target Temp", description="Целевая температура мешаута (°C)", configurable=True),
-    Property.Number(label="Hold Time", description="Время выдержки в минутах", configurable=True),
-    Property.Actor(label="Mash Stirrer", description="Актор мешалки (выкл. при старте)"),
-    Property.Actor(label="Pump", description="Актор насоса (вкл. с задержкой)"),
-    Property.Number(label="Pump Delay", description="Задержка перед включением насоса (мин)", configurable=True)
+    Property.Number(label="Timer", description="Time in Minutes", configurable=True), 
+    Property.Number(label="Temp", configurable=True),
+    Property.Sensor(label="Sensor"),
+    Property.Kettle(label="Kettle"),
+    Property.Select(label="AutoMode", options=["Yes", "No"], description="Switch Kettlelogic automatically on and off -> Yes"),
+    Property.Actor(label="Mash Stirrer", description="Actor to switch off at start (mash stirrer)"),
+    Property.Actor(label="Pump", description="Actor to switch on with delay (pump)"),
+    Property.Number(label="Pump Delay", description="Delay before pump starts (minutes)", configurable=True)
 ])
 class MashOutStep(CBPiStep):
 
-    @action("Добавить 5 минут к таймеру", [])
+    @action("Start Timer", [])
+    async def start_timer(self):
+        if self.timer.is_running is not True:
+            self.cbpi.notify(self.name, 'Timer started', NotificationType.INFO)
+            self.timer.start()
+            self.timer.is_running = True
+        else:
+            self.cbpi.notify(self.name, 'Timer is already running', NotificationType.WARNING)
+
+    @action("Add 5 Minutes to Timer", [])
     async def add_timer(self):
-        """Добавление 5 минут к работающему таймеру"""
         if self.timer.is_running == True:
-            self.cbpi.notify(self.name, 'Добавлено 5 минут', NotificationType.INFO)
+            self.cbpi.notify(self.name, '5 Minutes added', NotificationType.INFO)
             await self.timer.add(300)       
         else:
-            self.cbpi.notify(self.name, 'Таймер должен быть запущен, чтобы добавить время', NotificationType.WARNING)
+            self.cbpi.notify(self.name, 'Timer must be running to add time', NotificationType.WARNING)
 
     async def on_timer_done(self, timer):
-        """Действие при завершении таймера выдержки"""
         self.summary = ""
-        self.cbpi.notify(self.name, 'Мешаут завершен', NotificationType.SUCCESS)
-        
-        # Гарантированное отключение нагрева котла
-        if self.kettle is not None:
-            self.kettle.target_temp = 0
-            try:
-                await self.cbpi.kettle.set_target_temperature(self.kettle.id, 0)
-            except Exception:
-                pass
-            
-        # Выключаем насос
+        if self.AutoMode == True:
+            await self.setAutoMode(False)
         if self.pump is not None and self.pump_started:
             await self.actor_off(self.pump)
-            
+        self.cbpi.notify(self.name, 'Step finished', NotificationType.SUCCESS)
         await self.next()
 
     async def on_timer_update(self, timer, seconds):
-        """Обновление отображения таймера в интерфейсе (только время)"""
         self.summary = Timer.format_time(seconds)
         await self.push_update()
 
     async def on_start(self):
-        """Инициализация при запуске шага (в стиле BM_MashStep)"""
         self.port = str(self.cbpi.static_config.get('port', 8000))
+        self.AutoMode = True if self.props.get("AutoMode", "No") == "Yes" else False
+        self.kettle = self.get_kettle(self.props.Kettle)
+        self.kettle.target_temp = int(self.props.get("Temp", 0))
         
-        # 1. Получение параметров
-        self.kettle = self.get_kettle(self.props.get("Kettle", None))
-        self.sensor = self.props.get("Sensor", None)
-        self.target_temp = float(self.props.get("Target Temp", 78))
-        self.hold_time = int(self.props.get("Hold Time", 10))
         self.mash_stirrer = self.props.get("Mash Stirrer", None)
         self.pump = self.props.get("Pump", None)
         self.pump_delay = int(self.props.get("Pump Delay", 2))
-        
-        self.hold_time_seconds = self.hold_time * 60
         self.pump_delay_seconds = self.pump_delay * 60
         self.pump_started = False
-
-        # 2. Устанавливаем целевую температуру через API котла (ЭТО ВАЖНО!)
-        if self.kettle is not None:
-            self.kettle.target_temp = int(self.target_temp)
-            await self.cbpi.kettle.set_target_temperature(self.kettle.id, int(self.target_temp))
-            logger.info(f"Установлена целевая температура {self.target_temp}°C для котла {self.kettle.id}")
-
-        # 3. Отключаем мешалку при старте
+        
+        if self.AutoMode == True:
+            await self.setAutoMode(True)
+        
         if self.mash_stirrer is not None:
             await self.actor_off(self.mash_stirrer)
-            logger.info("Мешалка выключена")
+            logging.info("Mash stirrer switched off")
+        
+        await self.push_update()
 
-        # 4. Инициализация таймера (пока не запускаем)
         if self.timer is None:
-            self.timer = Timer(self.hold_time_seconds, on_update=self.on_timer_update, on_done=self.on_timer_done)
-
-        # 5. Запускаем отложенное включение насоса в фоновой задаче
+            self.timer = Timer(int(self.props.get("Timer", 0)) * 60, on_update=self.on_timer_update, on_done=self.on_timer_done)
+        self.summary = "Waiting for Target Temp"
+        
         asyncio.create_task(self.delayed_pump_start())
-
-        self.summary = f"Нагрев до {self.target_temp}°C"
+        
         await self.push_update()
 
     async def delayed_pump_start(self):
-        """Фоновая задача для включения насоса с задержкой"""
         await asyncio.sleep(self.pump_delay_seconds)
         if self.running and self.pump is not None and not self.pump_started:
             await self.actor_on(self.pump)
             self.pump_started = True
-            logger.info("Насос включен после задержки")
-            self.cbpi.notify(self.name, 'Насос включен', NotificationType.INFO)
+            logging.info("Pump switched on after delay")
+            self.cbpi.notify(self.name, 'Pump switched on', NotificationType.INFO)
             await self.push_update()
 
     async def on_stop(self):
-        """Действие при ручной остановке шага (безопасность)"""
         await self.timer.stop()
         self.summary = ""
-        
-        # Гарантированное отключение нагрева
-        if self.kettle is not None:
-            self.kettle.target_temp = 0
-            try:
-                await self.cbpi.kettle.set_target_temperature(self.kettle.id, 0)
-            except Exception:
-                pass
-            
-        # Выключаем насос
+        if self.AutoMode == True:
+            await self.setAutoMode(False)
         if self.pump is not None and self.pump_started:
             await self.actor_off(self.pump)
-            
         await self.push_update()
 
     async def reset(self):
-        """Сброс состояния шага"""
-        self.hold_time = int(self.props.get("Hold Time", 10))
-        self.timer = Timer(self.hold_time * 60, on_update=self.on_timer_update, on_done=self.on_timer_done)
+        self.timer = Timer(int(self.props.get("Timer", 0)) * 60, on_update=self.on_timer_update, on_done=self.on_timer_done)
         self.pump_started = False
 
     async def run(self):
-        """Основной цикл выполнения шага (в стиле BM_MashStep)"""
         while self.running == True:
             await asyncio.sleep(1)
-            
-            sensor_data = self.get_sensor_value(self.sensor)
-            if sensor_data and "value" in sensor_data:
-                sensor_value = float(sensor_data.get("value"))
-                
-                # ЛОГИКА НАГРЕВА: ждем достижения целевой температуры
-                if sensor_value >= self.target_temp and self.timer.is_running is not True:
-                    self.timer.start()
-                    self.timer.is_running = True
-                    logger.info(f"Температура {sensor_value}°C достигнута, таймер запущен")
-                        
-            await self.push_update()
-            
+            sensor_value = self.get_sensor_value(self.props.get("Sensor", None)).get("value")
+            if sensor_value >= int(self.props.get("Temp", 0)) and self.timer.is_running is not True:
+                self.timer.start()
+                self.timer.is_running = True
+                estimated_completion_time = datetime.fromtimestamp(time.time() + (int(self.props.get("Timer", 0))) * 60)
+                self.cbpi.notify(self.name, 'Timer started. Estimated completion: {}'.format(estimated_completion_time.strftime("%H:%M")), NotificationType.INFO)
         return StepResult.DONE
+
+    async def setAutoMode(self, auto_state):
+        try:
+            if (self.kettle.instance is None or self.kettle.instance.state == False) and (auto_state is True):
+                url = "http://127.0.0.1:" + self.port + "/kettle/" + self.kettle.id + "/toggle"
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url) as response:
+                        return await response.text()
+            elif (self.kettle.instance.state == True) and (auto_state is False):
+                await self.kettle.instance.stop()
+        except Exception as e:
+            logging.error("Failed to switch on KettleLogic {} {}".format(self.kettle.id, e))
 
 
 def setup(cbpi):
-    '''
-    Этот метод вызывается сервером CBPI4 при запуске для регистрации плагина.
-    '''
     cbpi.plugin.register("MashOutStep", MashOutStep)
