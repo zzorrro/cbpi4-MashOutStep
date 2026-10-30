@@ -136,16 +136,21 @@ class MashOutStep(CBPiStep):
 
     async def setAutoMode(self, auto_state):
         try:
+            # ВКЛЮЧЕНИЕ: если логика не запущена или выключена
             if (self.kettle.instance is None or self.kettle.instance.state == False) and (auto_state is True):
                 url = "http://127.0.0.1:" + self.port + "/kettle/" + self.kettle.id + "/toggle"
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url) as response:
                         return await response.text()
-            elif (self.kettle.instance.state == True) and (auto_state is False):
+            
+            # ВЫКЛЮЧЕНИЕ: только если instance существует и сейчас включен
+            # ИСПРАВЛЕНИЕ: добавлена проверка на None перед обращением к .state
+            elif self.kettle.instance is not None and self.kettle.instance.state == True and (auto_state is False):
                 await self.kettle.instance.stop()
                 await self.push_update()
+                
         except Exception as e:
-            logging.error("Failed to switch on KettleLogic {} {}".format(self.kettle.id, e))
+            logging.error("Failed to switch KettleLogic {} {}".format(self.kettle.id, e))
 
 
 def setup(cbpi):
